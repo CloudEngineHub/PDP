@@ -1,10 +1,17 @@
+import os
+import pathlib
+
 import numba
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 from pdp.dataset.replay_buffer import ReplayBuffer
-from pdp.utils.data_utils import dict_apply
+from pdp.utils.data import dict_apply
+from pdp.utils.normalizer import LinearNormalizer
+
+# Get the top-level directory of the project
+PROJECT_DIR = pathlib.Path(__file__).resolve().parents[2]
 
 
 @numba.jit(nopython=True)
@@ -45,8 +52,8 @@ class DiffusionPolicyDataset(Dataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
 
+        zarr_path = os.path.join(PROJECT_DIR, zarr_path)
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=self.keys)
-
         self.episode_ends = self.replay_buffer.episode_ends[:]
         self.episode_indices = self.replay_buffer.get_episode_idxs()
         self.indices = create_indices(
@@ -56,11 +63,14 @@ class DiffusionPolicyDataset(Dataset):
             pad_after=pad_after
         )
     
-    # def get_normalizer(self, mode='limits', **kwargs):
-    #     data = self._sample_to_data(self.replay_buffer, include_metadata=False)
-    #     normalizer = LinearNormalizer()
-    #     normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-    #     return normalizer
+    def get_normalizer(self):
+        data = {
+            'obs': self.replay_buffer['obs'],
+            'action': self.replay_buffer['action'],
+        }
+        normalizer = LinearNormalizer()
+        normalizer.fit(data=data, mode='limits')
+        return normalizer
 
     @property
     def num_episodes(self):
@@ -78,6 +88,9 @@ class DiffusionPolicyDataset(Dataset):
         }
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
+
+    def get_validation_dataset(self):
+        raise NotImplementedError
 
     def sample_sequence(self, idx):
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx  = self.indices[idx]
