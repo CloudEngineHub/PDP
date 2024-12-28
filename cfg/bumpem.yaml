@@ -3,7 +3,7 @@ _target_: pdp.workspace.DiffusionPolicyWorkspace
 dataset:
     _target_: pdp.dataset.dataset.DiffusionPolicyDataset
     zarr_path: null # Set from command line
-    horizon: 9
+    horizon: 6
     pad_after: 0 # 7
     pad_before: 0 # 1
 
@@ -23,7 +23,7 @@ val_dataloader:
     shuffle: false
 
 ema:
-    _target_: pdp.model.EMAModel
+    _target_: pdp.utils.common.EMAModel
     inv_gamma: 1.0
     max_value: 0.9999
     min_value: 0.0
@@ -48,26 +48,22 @@ optimizer:
 policy: # TODO
     _target_: pdp.policy.DiffusionPolicy
     num_inference_steps: 100
-    pred_action_steps_only: true
     model:
         _target_: pdp.modules.TransformerForDiffusion
         obs_type: ref
-        task: track
         causal_attn: True # (needed for the observation)
         past_action_visible: False # <------------------------------------- CHECK
-        film_conditioning: True
-        cond_dim: 360
-        horizon: 4
-        n_obs_steps: 4
-        n_action_steps: 1
-        input_dim: 69
-        n_cond_layers: 10
-        n_emb: 512 # BIG CHANGE
-        n_head: 8
-        n_layer: 10
-        output_dim: 69
-        p_drop_attn: 0.3 # .3
-        p_drop_emb: 0.0 # 0.0
+        obs_dim: 181
+        input_dim: 25
+        output_dim: 25
+        emb_dim: 256
+        T_obs: 4
+        T_action: 2
+        n_encoder_layers: 2
+        n_decoder_layers: 4
+        n_head: 4
+        p_drop_attn: 0.1
+        p_drop_emb: 0.0
     noise_scheduler:
         _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
         beta_end: 0.02
@@ -79,26 +75,15 @@ policy: # TODO
         variance_type: fixed_small
 
 training:
-    save_checkpoint_every: 50
-    topk:
-        format_str: epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt
-        k: 5
-        mode: min
-        monitor_key: train_loss
+    save_checkpoint_every: 50   # epochs
     debug: false
-    data_upsampling: true
+    logging: true
+    use_ema: true
     device: cuda:0
-    gradient_accumulate_every: 1
     lr_scheduler: cosine
-    lr_warmup_steps: 1000
-    max_train_steps: null
-    max_val_steps: null
+    lr_warmup_steps: 100
     num_epochs: 1500
-    resume: true
-    rollout_every: 25
-    sample_every: 25
+    rollout_every: 25   # TODO: Maybe implement policy rollouts during training
     seed: 42
     tqdm_interval_sec: 1.0
-    use_ema: true
-    val_every: 25
-    logging: true
+    val_every: 25       # TODO: Maybe implement val set evaluation during training

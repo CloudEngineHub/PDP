@@ -1,6 +1,7 @@
 '''
 File containing our transformer architecture and relevant pytorch submodules
 '''
+import math
 import logging
 import torch
 import torch.nn as nn
@@ -24,240 +25,77 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
-class TimeEmbedder(nn.Module):
-    def __init__(self, latent_dim):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.time_embed = nn.Sequential(
-            nn.Linear(self.latent_dim, self.latent_dim),
-            nn.Mish(),
-            nn.Linear(self.latent_dim, self.latent_dim),
-        )
-
-    def forward(self, timesteps, pos_emb):
-        return self.time_embed(pos_emb(timesteps))
-
-
-class CrossAttentionLayer(nn.Module):
-    def __init__(self, embed_dim, num_heads):
-        super().__init__()
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads)
-
-    def forward(self, query, key, value, key_padding_mask=None, need_weights=False):
-        # Cross-attention: query is compared against key and value from a different source
-        attn_output, attn_output_weights = self.multihead_attn(query, key, value, key_padding_mask=key_padding_mask, need_weights=need_weights)
-        return attn_output, attn_output_weights
-
-
-def featurewise_affine(x, scale_shift):
-    scale, shift = scale_shift
-    return (scale + 1) * x + shift
-
-
-class DenseFiLM(nn.Module):
-    """Feature-wise linear modulation (FiLM) generator."""
-
-    def __init__(self, embed_channels):
-        super().__init__()
-        self.embed_channels = embed_channels
-        self.block = nn.Sequential(
-            nn.Mish(), nn.Linear(embed_channels, embed_channels * 2)
-        )
-
-    def forward(self, position):
-        pos_encoding = self.block(position)
-        pos_encoding = Rearrange(pos_encoding, "b c -> b 1 c")
-        scale_shift = pos_encoding.chunk(2, dim=-1)
-        return scale_shift
-
-
 class TransformerForDiffusion(nn.Module):
     def __init__(
         self,
-        input_dim: int,
-        output_dim: int,
-        horizon: int,
-        n_obs_steps: int = None,
-        n_action_steps: int = None,
-        cond_dim: int = 0,
-        n_layer: int = 12,
-        n_head: int = 12,
-        n_emb: int = 768,
-        obs_type = None, 
-        task = None, 
-        p_drop_emb: float = 0.1,
-        p_drop_attn: float = 0.1,
-        causal_attn: bool=False, 
-        time_as_cond: bool=True, 
-        obs_as_cond: bool=False,
-        n_cond_layers: int = 0,
-        text_mask_prob: float = 0.1,
-        past_action_visible: bool = False,
-        film_conditioning: bool = False,
+        input_dim, output_dim, obs_dim, emb_dim, T_obs, T_action,
+        n_encoder_layers=4, n_decoder_layers=4, n_head=4,
+        p_drop_emb=0.1, p_drop_attn=0.1,
+        obs_type=None, causal_attn=False, past_action_visible=False,
     ):
         super().__init__()
-        assert n_obs_steps is not None
-        self.casual_attn = causal_attn  
+        assert T_obs is not None
+        assert obs_type == 'ref', f'Only support ref type observation for now'
+        self.causal_attn = causal_attn  
         self.past_action_visible = past_action_visible
-        self.film_conditioning = film_conditioning
-        self.task = task
       
-        self.cond_dim = cond_dim
+        self.obs_dim = obs_dim
+        self.input_dim = input_dim
         self.output_dim = output_dim
-        self.n_obs_steps = n_obs_steps
-        self.n_action_steps = n_action_steps
-        T = horizon
-
-        T_cond = 1
-        if not time_as_cond:
-            T += 1
-            T_cond -= 1
-        obs_as_cond = cond_dim > 0
-        if obs_as_cond:
-            assert time_as_cond
-            T_cond += n_obs_steps
-        
+        self.emb_dim = emb_dim
+        self.T_obs = T_obs
+        self.T_action = T_action
         self.obs_type = obs_type
 
-        # input embedding stem
-        self.input_emb = nn.Linear(input_dim, n_emb)
-        self.pos_emb = nn.Parameter(torch.zeros(1, T, n_emb))
+        # Conditional encoder
+        T_cond = 1 + self.T_obs
+        self.time_emb = SinusoidalPosEmb(self.emb_dim)
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, T_cond, self.emb_dim))
+        self.cond_obs_emb = nn.Linear(self.obs_dim, self.emb_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.emb_dim,
+            nhead=n_head,
+            dim_feedforward=4*self.emb_dim,
+            dropout=p_drop_attn,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=n_encoder_layers
+        )
+
+        # Decoder for action denoising
+        self.pos_emb = nn.Parameter(torch.zeros(1, self.T_action, self.emb_dim))
+        self.input_emb = nn.Linear(self.input_dim, self.emb_dim)
         self.drop = nn.Dropout(p_drop_emb)
-
-        # cond encoder
-        self.time_emb = SinusoidalPosEmb(n_emb)
-
-        self.n_emb= n_emb
-        self.my_pos_emb = SinusoidalPosEmb(n_emb)
-        self.my_time_emb = TimeEmbedder(n_emb)
-
-        self.cond_obs_emb = None
-        self.cond_obs_emb = nn.Sequential(
-            nn.Linear(cond_dim, 1024),
-            nn.Mish(),
-            nn.Linear(1024, n_emb)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.emb_dim,
+            nhead=self.emb_dim,
+            dim_feedforward=4*self.emb_dim,
+            dropout=p_drop_attn,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True # important for stability
         )
-        self.cond_ref_emb_layer  = nn.Sequential(
-            nn.Linear(216, 1024),
-            nn.Mish(),
-            nn.Linear(1024, n_emb)
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=n_decoder_layers
         )
-        
-        if self.film_conditioning:
-            self.film1 = nn.Sequential(
-                nn.Mish(),
-                nn.Linear(n_emb*3, 2 * n_emb *n_obs_steps), #cond dim, cond channels
-            )
-            self.film2 = nn.Sequential(
-                nn.Mish(),
-                nn.Linear(n_emb, 2 * n_emb *(n_obs_steps)), #cond dim, cond channels # previously 2 * n_emb * n_obs_steps
-            )
-        
-        self.cond_pos_emb = None
-        self.encoder = None
-        self.decoder = None
-        encoder_only = False
-        if T_cond > 0:
-            my_T_cond = T_cond      
+        self.ln_f = nn.LayerNorm(self.emb_dim)
+        self.head = nn.Linear(self.emb_dim, output_dim)
 
-            if self.task == 'track' and self.obs_type  == 'ref':
-                my_T_cond = T_cond + n_obs_steps
-
-            if self.task =='t2m' and self.obs_type == 't2m': 
-                my_T_cond = T_cond # + 1   # IF we want to include text embedding as well
-                
-            self.cond_pos_emb = nn.Parameter(torch.zeros(1, my_T_cond, n_emb))
-            if n_cond_layers > 0:
-                encoder_layer = nn.TransformerEncoderLayer(
-                    d_model=n_emb,
-                    nhead=n_head,
-                    dim_feedforward=4*n_emb,
-                    dropout=p_drop_attn,
-                    activation='gelu',
-                    batch_first=True,
-                    norm_first=True
-                )
-                self.encoder = nn.TransformerEncoder(
-                    encoder_layer=encoder_layer,
-                    num_layers=n_cond_layers
-                )
-            else:
-                self.encoder = nn.Sequential(
-                    nn.Linear(n_emb, 4 * n_emb),
-                    nn.Mish(),
-                    nn.Linear(4 * n_emb, n_emb)
-                )
-            # decoder
-            decoder_layer = nn.TransformerDecoderLayer(
-                d_model=n_emb,
-                nhead=n_head,
-                dim_feedforward=4*n_emb,
-                dropout=p_drop_attn,
-                activation='gelu',
-                batch_first=True,
-                norm_first=True # important for stability
-            )
-            self.decoder = nn.TransformerDecoder(
-                decoder_layer=decoder_layer,
-                num_layers=n_layer
-            )
-        else:
-            # encoder only BERT
-            encoder_only = True
-
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=n_emb,
-                nhead=n_head,
-                dim_feedforward=4*n_emb,
-                dropout=p_drop_attn,
-                activation='gelu',
-                batch_first=True,
-                norm_first=True
-            )
-            self.encoder = nn.TransformerEncoder(
-                encoder_layer=encoder_layer,
-                num_layers=n_layer
-            )
-
-        # attention mask
-        if causal_attn:
+        # Attention mask
+        if self.causal_attn:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             # torch.nn.Transformer uses additive mask as opposed to multiplicative mask in minGPT
             # therefore, the upper triangle should be -inf and others (including diag) should be 0.
-            sz = T - n_obs_steps # TAKARA :T   
-            mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+            mask = (torch.triu(torch.ones(self.T_action, self.T_action)) == 1).transpose(0, 1)
             mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
             self.register_buffer("mask", mask)
-
-            if time_as_cond and obs_as_cond:
-                S = T_cond
-                t, s = torch.meshgrid(
-                    torch.arange(T),
-                    torch.arange(S),
-                    indexing='ij'
-                )
-                mask = t >= (s-1) # add one dimension since time is the first token in cond
-                mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-                # import ipdb; ipdb.set_trace()
-
-                self.register_buffer('memory_mask', mask)
-            else:
-                self.memory_mask = None
         else:
             self.mask = None
-            self.memory_mask = None
-
-        # decoder head
-        self.ln_f = nn.LayerNorm(n_emb)
-        self.head = nn.Linear(n_emb, output_dim)
-        
-        # constants
-        self.T = T
-        self.T_cond = T_cond
-        self.horizon = horizon
-        self.time_as_cond = time_as_cond
-        self.obs_as_cond = obs_as_cond
-        self.encoder_only = encoder_only
 
         # init
         self.apply(self._init_weights)
@@ -266,10 +104,9 @@ class TransformerForDiffusion(nn.Module):
         )
     
     def _init_weights(self, module):
-        ignore_types = (nn.Dropout, 
-            SinusoidalPosEmb, 
-            TimeEmbedder,
-            DenseFiLM,
+        ignore_types = (
+            nn.Dropout, 
+            SinusoidalPosEmb,
             nn.TransformerEncoderLayer, 
             nn.TransformerDecoderLayer,
             nn.TransformerEncoder,
@@ -277,10 +114,10 @@ class TransformerForDiffusion(nn.Module):
             nn.ModuleList,
             nn.Mish,
             nn.MultiheadAttention,
-            CrossAttentionLayer,
             Rearrange,
             nn.SiLU,
-            nn.Sequential)
+            nn.Sequential
+        )
         if isinstance(module, (nn.Linear, nn.Embedding)):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if isinstance(module, nn.Linear) and module.bias is not None:
@@ -303,8 +140,6 @@ class TransformerForDiffusion(nn.Module):
             torch.nn.init.ones_(module.weight)
         elif isinstance(module, TransformerForDiffusion):
             torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
-            if module.cond_obs_emb is not None:
-                torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
         elif isinstance(module, ignore_types):
             # no param
             pass
@@ -340,8 +175,7 @@ class TransformerForDiffusion(nn.Module):
 
         # special case the position embedding parameter in the root GPT module as not decayed
         no_decay.add("pos_emb")
-        if self.cond_pos_emb is not None:
-            no_decay.add("cond_pos_emb")
+        no_decay.add("cond_pos_emb")
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -371,138 +205,48 @@ class TransformerForDiffusion(nn.Module):
 
     def forward(self, sample, timestep, cond=None, **kwargs):
         """
-        x: (B,T,input_dim)
+        sample: (B, T_action, input_dim)
         timestep: (B,) or int, diffusion step
-        cond: (B,T',cond_dim)
-        output: (B,T,input_dim)
+        cond: (B, T_obs, cond_dim)
         """
-        timesteps = timestep
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timesteps = timesteps.expand(sample.shape[0])
+        assert torch.is_tensor(timestep)
+        assert cond.shape == (sample.shape[0], self.T_obs, self.obs_dim)
+        assert sample.shape == (cond.shape[0], self.T_action, self.input_dim)
 
-        ###############################################################################
+        # Encoder for conditioning
+        timesteps = timestep.expand(sample.shape[0])
+        time_emb = self.time_emb(timesteps).unsqueeze(1)
+        # (B, 1, obs_dim)
 
-        if self.obs_type == 'ref':
-            assert self.task in ['t2m', 'track']
-        if self.obs_type == 'phc':
-            assert self.task == 'track', 'since obs type is phc, task must be track'
+        cond_emb = self.cond_obs_emb(cond)
+        cond_emb = torch.cat([time_emb, cond_emb], dim=1)
+        # (B, T_cond, obs_dim)
 
-        # time_emb = self.time_emb(timesteps).unsqueeze(1)
-        time_emb = self.my_time_emb(timesteps, self.my_pos_emb).unsqueeze(1) 
-
-        ###############################################################################
-
-        # process input 
-        input_emb = self.input_emb(sample)
-        cond_embeddings = time_emb
-
-        if self.obs_type == 'ref':
-            assert cond.shape[-1] > 360 
-            cond_ref = cond[:,:,360:] 
-            cond_obs = cond[:,:,:360]
-        else:
-            cond_obs = cond
-
-        if self.task == 'track':
-            if self.obs_type == 'ref':
-                cond_obs_emb = self.cond_obs_emb(cond_obs)
-                cond_ref_emb = self.cond_ref_emb_layer(cond_ref) 
-
-                ref_mask = self.mask_batch(
-                    cond_ref.shape[0], batch_mask_prob=0.1, training=self.training
-                ).to(cond_ref.device)
-                cond_ref_emb[ref_mask] *= 0 
-
-                cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb, cond_ref_emb], dim=1)
-            elif self.obs_type == 'phc': 
-                cond_obs_emb = self.cond_obs_emb(cond_obs)
-                cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb], dim=1)
-
-        # elif self.task == 'both': 
-        #     cond_obs_emb = self.cond_obs_emb(cond_obs)
-        #     cond_ref_emb = self.cond_ref_emb_layer(cond_ref) 
-        #     text_emb = self.embed_text(text).unsqueeze(1)
-        #     text_mask = self.mask_batch(text_emb.shape[0], batch_mask_prob=0.0, training=self.training)
-
-        else:
-            # Old Text2Motion
-            cond_obs_emb = self.cond_obs_emb(cond_obs)
-            
-            text_emb = self.embed_text(text).unsqueeze(1)
-            text_mask = self.mask_batch(text_emb.shape[0], batch_mask_prob=0.0, training=self.training)
-
-            scale_shifts = self.film1(torch.hstack([time_emb.squeeze(1), text_emb.squeeze(1), cond_obs_emb[:,-1].squeeze(1)])).view(-1, 2, self.n_obs_steps, self.n_emb)
-            scale, shift = torch.chunk(scale_shifts, 2, dim=1)
-
-            scale = scale.squeeze(1).clone()
-            shift = shift.squeeze(1).clone()
-            scale[text_mask] *=0 
-            shift[text_mask] *=0
-            
-            scale = scale.squeeze(1)
-            shift = shift.squeeze(1)
-            cond_obs_emb = (1+ scale) * cond_obs_emb + shift 
-            cond_embeddings = torch.cat([cond_embeddings, cond_obs_emb], dim=1)
-
-            # assert False, 'task not specified or supported'
-
-        tc = cond_embeddings.shape[1]
-        position_embeddings = self.cond_pos_emb[:, :tc, :]  # each position maps to a (learnable) vector
-        assert position_embeddings.shape[1] == tc, 'position embedding shape mismatch for observation'
-        
-        x = self.drop(cond_embeddings + position_embeddings)
+        tc = cond_emb.shape[1]
+        cond_pos_emb = self.cond_pos_emb[:, :tc, :]
+        x = self.drop(cond_emb + cond_pos_emb)
         x = self.encoder(x)
         memory = x 
-        
-        # (B,T_cond,n_emb)
-        ###############################################################################
+        # (B, T_cond, obs_dim)
 
-        # decoder   
-        token_embeddings = input_emb
-        t = token_embeddings.shape[1]
-
-        position_embeddings = self.pos_emb[:, :t, :]  # each position maps to a (learnable) vector
-        assert position_embeddings.shape[1] >= t, 'position embedding shape mismatch for token'
-
-        x = self.drop(token_embeddings + position_embeddings)
+        # Decoder for action prediction
+        input_emb = self.input_emb(sample)
+        t = sample.shape[1]
+        pos_emb = self.pos_emb[:, :t, :]
+        x = self.drop(input_emb + pos_emb)
+        x = self.decoder(
+            tgt=x,
+            memory=memory,
+            tgt_mask=self.mask,
+            memory_mask=None
+        )
+        # (B, T, obs_dim)
+        # NOTE: We don't need a memory mask because the conditioning is always on past information
         
-        if self.mask.shape[0] == 0:
-            x = self.decoder(
-                tgt=x,
-                memory=memory,
-                # tgt_mask=self.mask,
-                # tgt_mask=self.mask[:12,:12], # old takara
-            )
-        else:
-            x = self.decoder(
-                tgt=x,
-                memory=memory,
-                tgt_mask=self.mask,
-                # tgt_mask=self.mask[:12,:12], # old takara
-            )
-                # (B,T,n_emb)
-        
-        # head      
         x = self.ln_f(x)
         x = self.head(x)
-        # (B,T,n_out)
+        # (B, T, output_dim)
         return x
-
-    def generate_mask_efficient(self, n, probs):
-        # prob of each condition, Uncoditioned: (True, True),  text_masked: (False, True),  Ref masked: (True, False),
-        outcomes = torch.tensor([[False,False], [True, True], [False, True], [True, False]])
-        indices = torch.multinomial(torch.tensor(probs), n, replacement=True)
-        mask = outcomes[indices]
-        return mask[:,0], mask[:,1] 
-
-    # true if its masked, false otherwise 
-    def mask_batch(self, batch_size, batch_mask_prob=0.1, training=True):
-        bs = batch_size
-        if training and batch_mask_prob > 0.:
-            mask = torch.bernoulli(torch.ones(bs) * batch_mask_prob).bool() #.view(bs, 1, 1)
-            return mask   
-        else:
-            return torch.zeros(bs).bool()
 
 
 class LowdimMaskGenerator(nn.Module):

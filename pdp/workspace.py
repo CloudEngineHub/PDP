@@ -17,8 +17,7 @@ from tqdm import tqdm
 
 from pdp.policy import DiffusionPolicy
 from pdp.dataset.dataset import DiffusionPolicyDataset
-from pdp.utils.common import TopKCheckpointManager, JsonLogger
-from pdp.utils.scheduler import get_scheduler
+from pdp.utils.common import JsonLogger, get_scheduler, EMAModel
 
 # from accelerate import Accelerator, DistributedDataParallelKwargs
 # from accelerate.state import AcceleratorState
@@ -28,6 +27,9 @@ class DiffusionPolicyWorkspace:
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf):
+        if cfg.training.debug:
+            cfg.dataloader.num_workers = 0
+
         self.cfg = cfg
 
         # TODO: Maybe use accelerate for distributed training
@@ -51,6 +53,7 @@ class DiffusionPolicyWorkspace:
         # Configure dataset and dataloader
         dataset = hydra.utils.instantiate(cfg.dataset)
         self.train_dataloader = DataLoader(dataset, **cfg.dataloader)
+        assert dataset.horizon >= self.model.T_range
         
         # NOTE: In PDP we evaluated the validation set offline on various checkpoints
         # val_dataset = dataset.get_validation_dataset()
@@ -92,10 +95,25 @@ class DiffusionPolicyWorkspace:
     def get_checkpoint_path(self, tag='latest'):
         return pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
 
-    def save_checkpoint(self, path=None, tag='latest', 
-            exclude_keys=None,
-            include_keys=None,
-            use_thread=True):
+    def save_checkpoint(
+        self, path=None, tag='latest', 
+        exclude_keys=None,
+        include_keys=None,
+        use_thread=True
+    ):
+        def _copy_to_cpu(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().to('cpu')
+            elif isinstance(x, dict):
+                result = dict()
+                for k, v in x.items():
+                    result[k] = _copy_to_cpu(v)
+                return result
+            elif isinstance(x, list):
+                return [_copy_to_cpu(k) for k in x]
+            else:
+                return copy.deepcopy(x)
+
         if path is None:
             path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
         else:
@@ -111,7 +129,6 @@ class DiffusionPolicyWorkspace:
             'state_dicts': dict(),
             'pickles': dict()
         } 
-        # import ipdb; ipdb.set_trace()
         for key, value in self.__dict__.items():
             if hasattr(value, 'state_dict') and hasattr(value, 'load_state_dict'):
                 # modules, optimizers and samplers etc
@@ -125,12 +142,14 @@ class DiffusionPolicyWorkspace:
                         payload['state_dicts'][key] = value.state_dict()
             elif key in include_keys:
                 payload['pickles'][key] = dill.dumps(value)
+
         if use_thread:
             self._saving_thread = threading.Thread(
                 target=lambda : torch.save(payload, path.open('wb'), pickle_module=dill))
             self._saving_thread.start()
         else:
             torch.save(payload, path.open('wb'), pickle_module=dill)
+
         return str(path.absolute())
 
     def load_payload(self, payload, exclude_keys=None, include_keys=None, **kwargs):
@@ -180,7 +199,8 @@ class DiffusionPolicyWorkspace:
                 }
             )
 
-        # configure lr scheduler
+        # NOTE: The lr_scheduler is implemented as a pyorch LambdaLR scheduler. We step the learning rate at every
+        # batch, so num_training_steps := len(train_dataloader) * cfg.training.num_epochs
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
@@ -188,92 +208,61 @@ class DiffusionPolicyWorkspace:
             num_warmup_steps=cfg.training.lr_warmup_steps,
             # num_training_steps=len(self.train_dataloader) * cfg.training.num_epochs * self.accelerator.num_processes,
             num_training_steps=len(self.train_dataloader) * cfg.training.num_epochs,
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
         )
         # lr_scheduler = self.accelerator.prepare(lr_scheduler)
         
         # Configure ema
         if cfg.training.use_ema:
-            ema = hydra.utils.instantiate(
-                cfg.ema,
-                model=self.ema_model
-            )
+            ema: EMAModel = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
             # ema = self.accelerator.prepare(ema)
-
-        # configure checkpoint
-        topk_manager = TopKCheckpointManager(
-            save_dir=os.path.join(self.output_dir, 'checkpoints'),
-            **cfg.training.topk
-        )
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
-            cfg.training.max_train_steps = 3
-            cfg.training.max_val_steps = 3
             cfg.training.rollout_every = 1
             cfg.training.val_every = 1
-            cfg.training.sample_every = 1
 
         # self.accelerator.wait_for_everyone()
-        
-        log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        metric_dict = dict()
-        with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
-                step_log = dict()
-                train_losses = list()
-                for batch_idx, batch in enumerate(load_loop(self.train_dataloader)):
-                    loss = self.model(batch)
-                    # self.accelerator.backward(loss)
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
-                    lr_scheduler.step()
+        for local_epoch_idx in range(cfg.training.num_epochs):
+            train_losses = list()
+            for batch_idx, batch in enumerate(load_loop(self.train_dataloader)):
+                loss = self.model(batch)
+                # self.accelerator.backward(loss)
 
-                    # Update ema
-                    if cfg.training.use_ema:
-                        ema.step(self.model)
-
-                    # if self.accelerator.is_main_process:
-                    # Logging
-                    loss_cpu = loss.item()
-                    train_losses.append(loss_cpu)
-                    step_log = {
-                        'train_loss': loss_cpu,
-                        'global_step': self.global_step,
-                        'epoch': self.epoch,
-                        'lr': lr_scheduler.get_last_lr()[0]
-                    }
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                lr_scheduler.step()
+                if cfg.training.use_ema:
+                    ema.step(self.model)
 
                 # if self.accelerator.is_main_process:
-                if len(train_losses) > 0:
-                    train_loss = np.mean(train_losses)  
-                    step_log['train_loss'] = train_loss
-                    
-                if self.epoch % cfg.training.save_checkpoint_every == 0 and self.epoch > 0:
-                    self.save_checkpoint(tag=f'checkpoint_epoch_{self.epoch}')
-
-                if cfg.training.logging:
-                    wandb_run.log(step_log, step=self.global_step)
-                    json_logger.log(step_log)
-
+                # Logging
+                loss_cpu = loss.item()
+                train_losses.append(loss_cpu)
+                step_log = {
+                    'train_loss': loss_cpu,
+                    'global_step': self.global_step,
+                    'epoch': self.epoch,
+                    'lr': lr_scheduler.get_last_lr()[0]
+                }
                 self.global_step += 1
-                self.epoch += 1
+
+            self.epoch += 1
+            self.post_step(locals())
         
-        self.save_checkpoint(tag=f'checkpoint_epoch_{self.epoch}')
+        if not cfg.training.debug:
+            self.save_checkpoint(tag=f'checkpoint_epoch_{self.epoch}')
 
+    def post_step(self, locs):
+        # if self.accelerator.is_main_process:
+        cfg = locs['cfg']
+        step_log['train_loss'] = np.mean(locs['train_losses'])
+        if cfg.training.logging:
+            wandb_run.log(step_log, step=self.global_step)
 
-def _copy_to_cpu(x):
-    if isinstance(x, torch.Tensor):
-        return x.detach().to('cpu')
-    elif isinstance(x, dict):
-        result = dict()
-        for k, v in x.items():
-            result[k] = _copy_to_cpu(v)
-        return result
-    elif isinstance(x, list):
-        return [_copy_to_cpu(k) for k in x]
-    else:
-        return copy.deepcopy(x)
+        if not cfg.training.debug and (
+            self.epoch % cfg.training.save_checkpoint_every == 0 or
+            self.epoch == cfg.training.num_epochs
+        ):
+            self.save_checkpoint(tag=f'checkpoint_epoch_{self.epoch}')

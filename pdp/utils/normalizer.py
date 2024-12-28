@@ -19,7 +19,7 @@ def _fit(
         data = torch.from_numpy(data)
 
     dim = data.shape[-1]
-    data = data.reshape(-1, dim)
+    data = data.reshape(-1, dim).to(torch.float32)
 
     # compute input stats min max mean std
     input_min, _ = data.min(axis=0)

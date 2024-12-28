@@ -82,12 +82,13 @@ class DiffusionPolicyDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.sample_sequence(idx)
         data = {    
-            'obs': sample['obs'],          # T, D_o
-            'action': sample['action'],      # T, D_a
+            'obs': sample['obs'],           # T, D_o
+            'action': sample['action'],     # T, D_a
             'motion_fname': sample['motion_fname'],
         }
-        torch_data = dict_apply(data, torch.from_numpy)
-        return torch_data
+        data = dict_apply(data, torch.from_numpy)
+        data = dict_apply(data, lambda x: x.to(torch.float32))
+        return data
 
     def get_validation_dataset(self):
         raise NotImplementedError
