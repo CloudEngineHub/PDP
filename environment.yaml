@@ -1,0 +1,13 @@
+name: pdp
+channels:
+  - defaults
+  - pytorch 
+  - nvidia
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch=1.12.1
+  - torchvision=0.13.1
+  - pytorch-cuda=12.1
+  - pip:
+      - -e .

@@ -32,7 +32,6 @@ class DiffusionPolicy(nn.Module):
         self.noise_scheduler = noise_scheduler
         self.normalizer = None # set by set_normalizer
         self.num_inference_steps = num_inference_steps
-        self.kwargs = kwargs
 
     @property
     def T_range(self):
@@ -42,39 +41,24 @@ class DiffusionPolicy(nn.Module):
         return self.model.get_optim_groups(weight_decay)
     
     # ========= inference  ============
-    def conditional_sample(self,                 # included text, TAKARA
-            condition_data, text, clean_traj, condition_mask,
-            cond=None, generator=None,
-            # keyword arguments to scheduler.step
-            **kwargs
-            ):
+    def conditional_sample(self, cond_data, cond_mask, cond=None):
         model = self.model
         scheduler = self.noise_scheduler
-
         trajectory = torch.randn(
-            size=condition_data.shape, 
-            dtype=condition_data.dtype,
-            device=condition_data.device,
-            generator=generator)
+            size=cond_data.shape, 
+            dtype=cond_data.dtype,
+            device=cond_data.device,
+        )
 
-        # set step values
         scheduler.set_timesteps(self.num_inference_steps)
         for t in scheduler.timesteps:
-            # 1. apply conditioning
-            trajectory[condition_mask] = condition_data[condition_mask]
-
-            # 2. predict model output
+            trajectory[cond_mask] = cond_data[cond_mask]
             model_output = model(trajectory, t, cond)
     
-            # 3. compute previous image: x_t -> x_t-1
-            trajectory = scheduler.step(
-                model_output, t, trajectory, 
-                generator=generator,
-                **kwargs
-            ).prev_sample
+            # compute previous image: x_t -> x_t-1
+            trajectory = scheduler.step(model_output, t, trajectory).prev_sample
         
-        # finally make sure conditioning is enforced
-        trajectory[condition_mask] = condition_data[condition_mask]
+        trajectory[cond_mask] = cond_data[cond_mask] 
         return trajectory
 
     def predict_action(self, obs_dict):
@@ -83,8 +67,8 @@ class DiffusionPolicy(nn.Module):
         result: must include "action" key
         """
         assert 'obs' in obs_dict
-        assert 'past_action' not in obs_dict # not implemented yet
-        nobs = self.normalizer['obs'].normalize(obs_dict['obs'])
+        assert obs_dict['obs'].shape[1:] == (self.T_obs, self.obs_dim)
+        nobs = self.normalizer.normalize(obs_dict)['obs']
         B, _, obs_dim = nobs.shape
 
         # Handle different ways of passing observation
@@ -94,14 +78,12 @@ class DiffusionPolicy(nn.Module):
         cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
         # Run sampling
-        nsample = self.conditional_sample(cond_data, cond_mask, cond=cond, **self.kwargs)
+        nsample = self.conditional_sample(cond_data, cond_mask, cond=cond)
         
         # Unnormalize prediction and extract action
         naction_pred = nsample[..., :self.action_dim]
-        action_pred = self.normalizer['action'].unnormalize(naction_pred)    
-        result = {
-            'action': action_pred,
-        }
+        nresult = {'action': naction_pred}
+        result = self.normalizer.unnormalize(nresult)
         return result
     
     # ========= training  ============

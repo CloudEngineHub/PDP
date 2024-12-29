@@ -2,12 +2,14 @@ import os
 import pathlib
 import copy
 import random
+import threading
 
 import wandb
 import shutil
 import hydra
 import numpy as np
 import torch
+import dill
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
@@ -17,7 +19,9 @@ from tqdm import tqdm
 
 from pdp.policy import DiffusionPolicy
 from pdp.dataset.dataset import DiffusionPolicyDataset
-from pdp.utils.common import JsonLogger, get_scheduler, EMAModel
+from pdp.utils.common import get_scheduler
+from pdp.utils.data import dict_apply
+from pdp.utils.ema_model import EMAModel
 
 # from accelerate import Accelerator, DistributedDataParallelKwargs
 # from accelerate.state import AcceleratorState
@@ -31,6 +35,7 @@ class DiffusionPolicyWorkspace:
             cfg.dataloader.num_workers = 0
 
         self.cfg = cfg
+        self.device = torch.device(cfg.training.device)
 
         # TODO: Maybe use accelerate for distributed training
         # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -63,6 +68,8 @@ class DiffusionPolicyWorkspace:
         self.model.set_normalizer(normalizer)
         self.ema_model = copy.deepcopy(self.model)
         self.ema_model.set_normalizer(normalizer)
+        self.model.to(self.device)      # Send model to GPU after setting normalizer
+        self.ema_model.to(self.device)
 
         self.global_step = 0
         self.epoch = 0
@@ -79,28 +86,16 @@ class DiffusionPolicyWorkspace:
         return HydraConfig.get().runtime.output_dir
 
     @classmethod
-    def create_from_checkpoint(cls, path, 
-            exclude_keys=None, 
-            include_keys=None,
-            **kwargs):
+    def create_from_checkpoint(cls, path, **kwargs):
         payload = torch.load(open(path, 'rb'), pickle_module=dill)
         instance = cls(payload['cfg'])
-        instance.load_payload(
-            payload=payload, 
-            exclude_keys=exclude_keys,
-            include_keys=include_keys,
-            **kwargs)
+        instance.load_payload(payload=payload, **kwargs)
         return instance
 
     def get_checkpoint_path(self, tag='latest'):
         return pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
 
-    def save_checkpoint(
-        self, path=None, tag='latest', 
-        exclude_keys=None,
-        include_keys=None,
-        use_thread=True
-    ):
+    def save_checkpoint(self, path=None, tag='latest', use_thread=True):
         def _copy_to_cpu(x):
             if isinstance(x, torch.Tensor):
                 return x.detach().to('cpu')
@@ -118,10 +113,6 @@ class DiffusionPolicyWorkspace:
             path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
         else:
             path = pathlib.Path(path)
-        if exclude_keys is None:
-            exclude_keys = tuple(self.exclude_keys)
-        if include_keys is None:
-            include_keys = tuple(self.include_keys) + ('_output_dir',)
 
         path.parent.mkdir(parents=False, exist_ok=True)
         payload = {
@@ -132,16 +123,13 @@ class DiffusionPolicyWorkspace:
         for key, value in self.__dict__.items():
             if hasattr(value, 'state_dict') and hasattr(value, 'load_state_dict'):
                 # modules, optimizers and samplers etc
-                if key not in exclude_keys:
-                    if use_thread:
-                        # payload['state_dicts'][key] = _copy_to_cpu(
-                        #     self.accelerator.unwrap_model(value).state_dict()) 
-                        payload['state_dicts'][key] = _copy_to_cpu(value.state_dict()) 
-                    else:
-                        # payload['state_dicts'][key] = self.accelerator.unwrap_model(value).state_dict()
-                        payload['state_dicts'][key] = value.state_dict()
-            elif key in include_keys:
-                payload['pickles'][key] = dill.dumps(value)
+                if use_thread:
+                    # payload['state_dicts'][key] = _copy_to_cpu(
+                    #     self.accelerator.unwrap_model(value).state_dict()) 
+                    payload['state_dicts'][key] = _copy_to_cpu(value.state_dict()) 
+                else:
+                    # payload['state_dicts'][key] = self.accelerator.unwrap_model(value).state_dict()
+                    payload['state_dicts'][key] = value.state_dict()
 
         if use_thread:
             self._saving_thread = threading.Thread(
@@ -152,31 +140,17 @@ class DiffusionPolicyWorkspace:
 
         return str(path.absolute())
 
-    def load_payload(self, payload, exclude_keys=None, include_keys=None, **kwargs):
-        if exclude_keys is None:
-            exclude_keys = tuple()
-        if include_keys is None:
-            include_keys = payload['pickles'].keys()
-        
+    def load_payload(self, payload, **kwargs):       
         for key, value in payload['state_dicts'].items():
-            if key not in exclude_keys:
-                self.__dict__[key].load_state_dict(value, **kwargs)
-        for key in include_keys:
-            if key in payload['pickles']:
-                self.__dict__[key] = dill.loads(payload['pickles'][key])
+            self.__dict__[key].load_state_dict(value, **kwargs)
 
-    def load_checkpoint(self, path=None, tag='latest',
-            exclude_keys=None, 
-            include_keys=None, 
-            **kwargs):
+    def load_checkpoint(self, path=None, tag='latest', **kwargs):
         if path is None:
             path = self.get_checkpoint_path(tag=tag)
         else:
             path = pathlib.Path(path)
         payload = torch.load(path.open('rb'), pickle_module=dill, **kwargs)
-        self.load_payload(payload, 
-            exclude_keys=exclude_keys, 
-            include_keys=include_keys)
+        self.load_payload(payload)
         return payload
 
     def run(self):
@@ -212,7 +186,6 @@ class DiffusionPolicyWorkspace:
         )
         # lr_scheduler = self.accelerator.prepare(lr_scheduler)
         
-        # Configure ema
         if cfg.training.use_ema:
             ema: EMAModel = hydra.utils.instantiate(cfg.ema, model=self.ema_model)
             # ema = self.accelerator.prepare(ema)
@@ -221,11 +194,13 @@ class DiffusionPolicyWorkspace:
             cfg.training.num_epochs = 2
             cfg.training.rollout_every = 1
             cfg.training.val_every = 1
+            cfg.training.save_checkpoint_every = 1
 
         # self.accelerator.wait_for_everyone()
         for local_epoch_idx in range(cfg.training.num_epochs):
             train_losses = list()
             for batch_idx, batch in enumerate(load_loop(self.train_dataloader)):
+                batch = dict_apply(batch, lambda x: x.to(self.device))
                 loss = self.model(batch)
                 # self.accelerator.backward(loss)
 
@@ -237,7 +212,6 @@ class DiffusionPolicyWorkspace:
                     ema.step(self.model)
 
                 # if self.accelerator.is_main_process:
-                # Logging
                 loss_cpu = loss.item()
                 train_losses.append(loss_cpu)
                 step_log = {
@@ -250,18 +224,18 @@ class DiffusionPolicyWorkspace:
 
             self.epoch += 1
             self.post_step(locals())
-        
-        if not cfg.training.debug:
-            self.save_checkpoint(tag=f'checkpoint_epoch_{self.epoch}')
 
     def post_step(self, locs):
         # if self.accelerator.is_main_process:
         cfg = locs['cfg']
-        step_log['train_loss'] = np.mean(locs['train_losses'])
+
         if cfg.training.logging:
+            wandb_run = locs['wandb_run']
+            step_log = locs['step_log']
+            step_log['train_loss'] = np.mean(locs['train_losses'])
             wandb_run.log(step_log, step=self.global_step)
 
-        if not cfg.training.debug and (
+        if (
             self.epoch % cfg.training.save_checkpoint_every == 0 or
             self.epoch == cfg.training.num_epochs
         ):

@@ -23,7 +23,7 @@ val_dataloader:
     shuffle: false
 
 ema:
-    _target_: pdp.utils.common.EMAModel
+    _target_: pdp.utils.ema_model.EMAModel
     inv_gamma: 1.0
     max_value: 0.9999
     min_value: 0.0
@@ -35,7 +35,7 @@ logging:
     id: null
     mode: online
     name: null
-    project: physdiffpol
+    project: pdp
     resume: true
 
 optimizer:
@@ -75,7 +75,7 @@ policy: # TODO
         variance_type: fixed_small
 
 training:
-    save_checkpoint_every: 50   # epochs
+    save_checkpoint_every: 100   # epochs
     debug: false
     logging: true
     use_ema: true

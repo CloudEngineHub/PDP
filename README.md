@@ -14,5 +14,9 @@ python train.py \
     dataset.zarr_path=data/bumpem_dass-noise-level-0.12/data.zarr \
 ```
 
+## Evaluating a Policy
+
+For Bump-em:
+
 
 ## TODO:

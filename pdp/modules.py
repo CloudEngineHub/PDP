@@ -212,6 +212,8 @@ class TransformerForDiffusion(nn.Module):
         assert torch.is_tensor(timestep)
         assert cond.shape == (sample.shape[0], self.T_obs, self.obs_dim)
         assert sample.shape == (cond.shape[0], self.T_action, self.input_dim)
+        if len(timestep.shape) == 0:
+            timestep = timestep[None].to(sample.device)
 
         # Encoder for conditioning
         timesteps = timestep.expand(sample.shape[0])
