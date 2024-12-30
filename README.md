@@ -47,9 +47,7 @@ bash scripts/eval_bumpem.sh
 
 The result should look something like this:
 
-<video autoplay loop muted playsinline controls>
-    <source src="assets/bumpem_eval_result.mp4" type="video/mp4">
-</video>
+![Bump-em Gif](assets/bumpem_eval_result.gif)
 
 
 ## Additional Details
