@@ -47,7 +47,7 @@ bash scripts/eval_bumpem.sh
 
 The result should look something like this:
 
-![Bump-em Gif](assets/bumpem_eval_result.gif)
+<img src="assets/bumpem_eval_result.gif" alt="" width="256" height="256" style="border-radius: 5px;">
 
 
 ## Additional Details
