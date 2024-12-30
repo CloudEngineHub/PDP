@@ -1,10 +1,10 @@
-# PDP
+# PDP Official Codebase
 
 [![Paper](https://img.shields.io/badge/Paper-blue)](https://dl.acm.org/doi/full/10.1145/3680528.3687683)
 [![Project Site](https://img.shields.io/badge/Project%20Site-grey.svg)](https://stanford-tml.github.io/PDP.github.io/)
 [![The Movement Lab](https://img.shields.io/badge/The%20Movement%20Lab-red.svg)](https://tml.stanford.edu/)
 
-Official codebase for PDP. This codebase currently supports the perturbatino recovery task from the PDP paper.
+Official codebase for PDP. This codebase currently supports the perturbation recovery task from the PDP paper. Our code is based heavily on the <a href="https://github.com/real-stanford/diffusion_policy" target="_blank">Diffusion Policy</a> codebase. We take only the necessary parts of their codebase to simplify the PDP implementation.
 
 
 ## Setup
@@ -21,7 +21,7 @@ conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvi
 pip install -e .
 ```
 
-Then download the Bump-em dataset from [here](https://drive.google.com/file/d/1CnlsnwA1e5U4UFqUj_Uz_l-tkkjQvh1I/view?usp=drive_link) and put it in the `data/` directory and extract it.
+Then download the Bump-em dataset from <a href="https://drive.google.com/file/d/1CnlsnwA1e5U4UFqUj_Uz_l-tkkjQvh1I/view?usp=drive_link" target="_blank">here</a> and put it in the `data/` directory and extract it.
 
 ```bash
 tar -xzvf /path/to/dataset.tar.gz -C data/
