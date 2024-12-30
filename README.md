@@ -54,10 +54,10 @@ The result should look something like this:
 
 ### Bump-em Dataset
 
-The dataset contains observation and action data collected on the perturbation recovery task. The observation is composed of the following quantities for 10 bodies in the model, plus a perturbation signal, yielding a 181 dimensional observation:
+The dataset contains observation and action data collected on the perturbation recovery task. The observation is composed of the following quantities for 10 of the bodies in the model, plus a perturbation signal, yielding a 181 dimensional observation:
 - 3D body position (3 * 10 values)
 - 3x3 rotation matrix (9 * 10 values)
 - 6D linear + angular velocities (6 * 10 values)
 - Perturbation signal (1 value)
 
-The action is the 25 DoF desired join positions. The data was collected at 50Hz.
+The actions are the 25 DoF desired joint positions. The data was collected at 50Hz.
