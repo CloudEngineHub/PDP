@@ -2,6 +2,7 @@ import argparse
 import collections
 from pathlib import Path
 
+import imageio
 import dill
 import hydra
 import torch
@@ -60,9 +61,8 @@ class Evaluator:
         print(f'Episode finished after {n_steps} steps')
 
         if self.args.save_video:
-            import imageio
             Path('visuals').mkdir(exist_ok=True)
-            imageio.mimsave('visuals/bumpem.mp4', frames, fps=50)
+            imageio.mimsave('visuals/bumpem_eval_result.mp4', frames, fps=50)
 
 
 

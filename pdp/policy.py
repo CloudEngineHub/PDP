@@ -17,11 +17,9 @@ class DiffusionPolicy(nn.Module):
         self, 
         model: TransformerForDiffusion,
         noise_scheduler: DDPMScheduler,
-        num_inference_steps,
         **kwargs
     ):
         super().__init__()
-        assert num_inference_steps is not None
 
         self.model = model
         self.obs_dim = self.model.obs_dim
@@ -30,8 +28,8 @@ class DiffusionPolicy(nn.Module):
         self.T_action = self.model.T_action
 
         self.noise_scheduler = noise_scheduler
+        self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         self.normalizer = None # set by set_normalizer
-        self.num_inference_steps = num_inference_steps
 
     @property
     def T_range(self):
@@ -149,12 +147,3 @@ class DiffusionPolicy(nn.Module):
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
         return loss
-
-    def exponential_decay_with_control_and_cap(self, x, control_x, control_y):
-        # Calculate the decay rate b based on the control point, where at x=0, y=1, and at x=control_x, y=control_y and everything after control_x is capped at control_y 
-        b = -torch.log(control_y) / control_x
-        decay_values = torch.exp(-b * x)
-
-        # Cap the values where x is greater than control_x
-        capped_values = torch.where(x > control_x, torch.maximum(decay_values, control_y), decay_values)
-        return capped_values

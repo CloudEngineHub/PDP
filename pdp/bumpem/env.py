@@ -11,6 +11,8 @@ from scipy.interpolate import interp1d
 from gym import utils
 from gym.utils.renderer import Renderer
 from gym.envs.mujoco import Viewer, RenderContextOffscreen
+
+# Can comment this out if you have a display
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 
@@ -31,16 +33,13 @@ ENV_CONFIG = {
     'render_mode': 'rgb_array',
     'init_type': 'init_dist', 
     'init_path': 'motions/S07DN_init_dist',
-    'ref_path': None,
-
-    'obs_size': 181,
     'frame_skip': 2,
+
     'max_ep_time': 6,
-    
     'pert': {
         'active': True,
         'p_phs': .325,
-        'imp_time': None, 
+        'imp_time': 0, 
         'p_frc_frac': 0.15,
         'p_ang': 90,
         'p_dur': .3,
@@ -52,6 +51,14 @@ ENV_CONFIG = {
         'p_frc_frac': [0.0745, 0.15],
         'p_dur': .3,
     },
+
+    # Mujoco bodies to include in the obs
+    'obs_mj_body_names': [
+        'pelvis',
+        'femur_r', 'tibia_r', 'calcn_r', 'toes_r',
+        'femur_l', 'tibia_l', 'calcn_l', 'toes_l',
+        'torso',
+    ]
 }
 
 
@@ -85,13 +92,7 @@ class MujocoEnv:
 
         # defined metadata here and removed asserts, annoying to redefine render_fps everytime...
         self.metadata = {
-            "render_modes": [
-                "human",
-                "rgb_array",
-                "depth_array",
-                "single_rgb_array",
-                "single_depth_array",
-            ],
+            "render_modes": ["human", "rgb_array"],
             "render_fps": int(np.round(1.0 / self.dt)),
         }
 
@@ -145,9 +146,6 @@ class MujocoEnv:
 
         if mode in {
             "rgb_array",
-            "single_rgb_array",
-            "depth_array",
-            "single_depth_array",
         }:
             if camera_id is not None and camera_name is not None:
                 raise ValueError(
@@ -168,16 +166,10 @@ class MujocoEnv:
 
                 self._get_viewer(mode).render(width, height, camera_id=camera_id)
 
-        if mode in {"rgb_array", "single_rgb_array"}:
+        if mode == "rgb_array":
             data = self._get_viewer(mode).read_pixels(width, height, depth=False)
             # original image is upside-down, so flip it
             return data[::-1, :, :]
-        elif mode in {"depth_array", "single_depth_array"}:
-            self._get_viewer(mode).render(width, height)
-            # Extract depth part of the read_pixels() tuple
-            data = self._get_viewer(mode).read_pixels(width, height, depth=True)[1]
-            # original image is upside-down, so flip it
-            return data[::-1, :]
         elif mode == "human":
             self._get_viewer(mode).render()
 
@@ -240,89 +232,49 @@ class MujocoEnv:
         return self.viewer
 
 
-class Skeleton(MujocoEnv, utils.EzPickle):
-    metadata = {
-        "render_modes": [
-            "human",
-            "rgb_array",
-            "depth_array",
-            "single_rgb_array",
-            "single_depth_array",
-        ],
-        "render_fps": -1,  # redefined
-    }
-
-    def __init__(self, config=ENV_CONFIG, **kwargs):
-        args = config
-        self.xml_file = args['xml_file']
-        self.frame_skip = args['frame_skip']
-        self.render_mode = args['render_mode']
-        
+class Skeleton(MujocoEnv):
+    def __init__(self, cfg=ENV_CONFIG, **kwargs):
+        self.cfg = cfg
+        self.xml_file = self.cfg['xml_file']
+        self.frame_skip = self.cfg['frame_skip']
+        self.render_mode = self.cfg['render_mode']
+        self.max_ep_time = self.cfg['max_ep_time']
         MujocoEnv.__init__(self, self.xml_file, self.frame_skip, render_mode=self.render_mode, **kwargs)
-        utils.EzPickle.__init__(self, args, **kwargs)
 
-        self.agent_obs_size = args['obs_size']
-        self.xml_file = args['xml_file']
-
-        self.ref_path =  args['ref_path']
+        # Path to file that contains the initial distribution of qpos and qvel
         self.init_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            args['init_path']
+            self.cfg['init_path']
         )
         assert os.path.exists(self.init_path), f"init_path {self.init_path} does not exist"
-
-        self.p_active = args['pert']['active']
-        self.p_phs = args['pert']['p_phs']
-        self.p_frc_frac = args['pert']['p_frc_frac']
-        self.p_frc = 9.81 * 59 * self.p_frc_frac
-        self.p_ang = args['pert']['p_ang']
-        self.p_dur = args['pert']['p_dur']
-        self.imp_time = args['pert']['imp_time']
-        
-        self.rand_pert_active = False
-        if 'rand_pert' in args:
-            self.rand_pert_active = args['rand_pert']['active']
-            self.rand_imp_time_range = args['rand_pert']['imp_time']
-            self.rand_p_frc_frac_range = args['rand_pert']['p_frc_frac']
-            self.p_dur = args['rand_pert']['p_dur']
-            
-            if self.rand_pert_active and self.p_active: 
-                raise ValueError('Both perturbation and random perturbation cannot be active at the same time')
-
-        self.init_type = args['init_type']
+        self.init_type = self.cfg['init_type']
+        assert self.init_type in ['init_dist']
         self.maybe_load_init_dist(self.init_path)
 
-        """"""
-        # State trackers
-        self.force_already_applied = False
-        self.force_being_applied = False
-        self.initial_phase_offset = None
-        self.force_end_time = None
-        self.force_start_time = None
-        self.prev_time = None
-        self.signal = 0
-        self.lhs_signal = 0
-        self.sim_step = 0
+        # Perturbation parameters
+        self.p_active = self.cfg['pert']['active']
+        self.rand_pert_active = self.cfg['rand_pert']['active']
+        assert not (self.p_active and self.rand_pert_active), "Only one perturbation type can be active at a time"
+        
+        self.obs_mj_body_names = self.cfg['obs_mj_body_names']
 
-        self.foot_state = 'wait_lhs'
-        self.completed_gait_cycles = 0
-        self.lhs_time = collections.deque(maxlen=3)
-        self.gait_cycle_time = None
-        self.new_gait_cycle = False
-        self.phase_est = None
-        self.cycle_start_time = None
-        self.prev_phase = None
-                
-        self.left_foot_first_contact_pos = None
-        self.right_foot_first_contact_pos = None
+    @property
+    def action_dim(self):
+        return self.model.nu
 
-        action_bounds = self.model.actuator_ctrlrange.copy().astype(np.float32)
-        self.action_bounds_low = action_bounds[:, 0]
-        self.action_bounds_high = action_bounds[:, 1]
-
-        self.frame_skip = args['frame_skip']
-        self.max_ep_time = args['max_ep_time']
-        self.render_mode = args['render_mode']
+    @property
+    def mj_body_names(self):
+        return [
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i)
+            for i in range(self.model.nbody)
+        ]
+    
+    @property
+    def obs_mj_body_idxs(self):
+        return [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in self.obs_mj_body_names
+        ]
         
     def maybe_load_init_dist(self, path):
         if self.init_type == 'init_dist':
@@ -333,64 +285,78 @@ class Skeleton(MujocoEnv, utils.EzPickle):
             self.init_qvel_std = np.load(path + '/init_qvel_std.npy')
             self.init_qvel_std[np.where(self.init_qvel_std == 0)] = .1
 
-    @property
-    def done(self):
+    def reset_model(self):
+        # Handle perturbation parameters
+        if self.p_active:
+            self.p_frc_frac = self.cfg['pert']['p_frc_frac']
+            self.p_frc = 9.81 * 59 * self.p_frc_frac
+            self.p_ang = self.cfg['pert']['p_ang']
+            self.p_dur = self.cfg['pert']['p_dur']
+            self.imp_time = self.cfg['pert']['imp_time']
+        elif self.rand_pert_active:
+            self.rand_p_frc_frac_range = self.cfg['rand_pert']['p_frc_frac']
+            self.p_frc_frac = np.random.uniform(*self.rand_p_frc_frac_range)
+            p_frc = 9.81 * 59 * self.p_frc_frac
+            self.p_frc = np.random.choice([self.p_frc, -self.p_frc])
+            self.p_ang = None
+            self.p_dur = self.cfg['rand_pert']['p_dur']
+            self.rand_imp_time_range = self.cfg['rand_pert']['imp_time']
+            self.imp_time = np.random.uniform(*self.rand_imp_time_range)
+
+        # Handle initial state
+        if self.init_type == 'init_dist':
+            # This is for checking how diverse the policy can be given the identical starting state. add some noise when we test for robustness.
+            qpos = np.random.normal(self.init_qpos_mean, self.init_qpos_std)
+            qvel = np.random.normal(self.init_qvel_mean, self.init_qvel_std)
+        self.set_state(qpos, qvel)
+
+        # State machine info
+        self.force_already_applied = False
+        self.force_being_applied = False
+        self.first_left_contact = False
+        self.first_right_contact = False
+        self.signal = 0
+        
+        self.left_foot_first_contact_pos = np.array([np.inf, np.inf]) 
+        self.right_foot_first_contact_pos = np.array([np.inf, np.inf])
+        self.left_foot_first_contact_root_pos = np.array([np.inf, np.inf])
+        self.right_foot_first_contact_root_pos = np.array([np.inf, np.inf])
+
+        self.data.qfrc_applied[:] = 0
+        self.model.geom_rgba[[1, 2, 22, 23, 27], :] = np.array([.7, .5, .3, 1])
+
+        return self.get_obs()
+
+    def reset(self):
+        self._reset_simulation()
+        obs = self.reset_model()
+        self.renderer.reset()
+        self.renderer.render_step()
+        return obs
+
+    def get_done(self):
         done = self.data.body('torso').xpos[2] <= .6
         done = done or self.data.time > self.max_ep_time
         return done
 
     def get_obs(self):
-        exlude_idxs = [0, 4, 9, 14, 18, 16, 20, 15, 19, 13, 17, 21]  # world, talus_r, talus_l, ulna_r, ulna_l, hand_r, hand_l, radius_r, radius_l, humerus_r, humerus_l, toes_r, toes_l, treadmill
+        idxs = self.obs_mj_body_idxs
+        xipos = self.data.xipos[idxs]
+        ximat = self.data.ximat[idxs]
+        cvel = self.data.cvel[idxs]
 
-        xipos = np.delete(self.data.xipos.copy(), exlude_idxs, axis=0)
-        ximat = np.delete(self.data.ximat.copy(), exlude_idxs, axis=0)
-        cvel = np.delete(self.data.cvel.copy(), exlude_idxs, axis=0)
         # Signal for inference
-        if self.force_being_applied:
-            self.signal = 1
-        else:
-            self.signal *= .85
-
+        self.signal = 1 if self.force_being_applied else self.signal * 0.85
         self.signal = self.signal if self.signal >= 1e-3 else 0
         
-        observation = np.hstack((xipos.flatten(), ximat.flatten(), cvel.flatten(), self.signal)) ##, self.p_frc))
-        return observation
-
-    def apply_force_phase(self):
-        # reset force_applied flag 3 seconds after pert
-        if self.force_end_time is not None :
-            if self.data.time >= self.force_end_time + 4 and self.force_already_applied:
-                self.force_already_applied = False
-
-        if self.phase_est is not None and self.prev_phase is not None and self.data.time > 3:
-            current_phase = self.phase_est % 1
-            prev_phase = self.prev_phase % 1
-            phase_crossed = (prev_phase < self.p_phs <= current_phase) or (prev_phase > current_phase and self.p_phs in [0, 1])
-            if not self.force_being_applied and not self.force_already_applied and phase_crossed:
-                self.force_being_applied = True
-                self.force_start_time = self.data.time
-                self.force_end_time = self.force_start_time + self.p_dur
-
-                self.data.qfrc_applied[0] = np.cos(self.p_ang * np.pi / 180) * self.p_frc
-                self.data.qfrc_applied[2] = np.sin(self.p_ang * np.pi / 180) * self.p_frc
-                self.model.geom_rgba = np.array([1, 1, 1, 1])
-
-            elif self.force_being_applied and self.data.time > self.force_end_time:
-                self.force_already_applied = True
-                self.force_being_applied = False
-                self.data.qfrc_applied[:] = 0
-                self.model.geom_rgba = np.array([.7, .5, .3, 1])
+        obs = np.hstack((xipos.flatten(), ximat.flatten(), cvel.flatten(), self.signal))
+        return obs
 
     def update_foot_contact_positions(self):
         # returns the first 
         lhs = self.data.body('calcn_l').cfrc_ext[5]
         rhs = self.data.body('calcn_r').cfrc_ext[5]
-
-        left_foot = np.array([np.inf, np.inf])
-        right_foot = np.array([np.inf, np.inf])
-        root_pos = np.array([np.inf, np.inf])
-        
-        if self.data.time > .1 and self.force_already_applied: # crude filter
+        if self.data.time > .1 and self.force_already_applied:
             if lhs and not self.first_left_contact: 
                 x_pos = self.data.body('calcn_l').xpos[0] # x, y (skel env defined in y up coordinate system)
                 y_pos = -self.data.body('calcn_l').xpos[1] # x, y (skel env defined in y up coordinate system)
@@ -399,7 +365,6 @@ class Skeleton(MujocoEnv, utils.EzPickle):
                 x_root = self.data.body('pelvis').xpos[0]
                 y_root = -self.data.body('pelvis').xpos[1]
                 root_pos = np.array([y_root, x_root])
-
                 self.left_foot_first_contact_pos = left_foot.copy()
                 self.left_foot_first_contact_root_pos = root_pos.copy()
                 self.first_left_contact = True
@@ -412,143 +377,23 @@ class Skeleton(MujocoEnv, utils.EzPickle):
                 x_root = self.data.body('pelvis').xpos[0]
                 y_root = -self.data.body('pelvis').xpos[1]
                 root_pos = np.array([y_root, x_root])
-
                 self.right_foot_first_contact_pos = right_foot.copy()
                 self.right_foot_first_contact_root_pos = root_pos.copy()
                 self.first_right_contact = True
 
-        return np.hstack((left_foot, right_foot))
-
-    def get_episode_foot_contact_positions(self):
-        return np.hstack((self.left_foot_first_contact_pos, self.right_foot_first_contact_pos))
-
-    def get_episode_foot_contact_positions_root(self):
-        return np.hstack((self.left_foot_first_contact_root_pos, self.right_foot_first_contact_root_pos))
-
     def apply_force_sim(self, imp_time=None):
-        if self.imp_time is None: 
-            self.imp_time = 0 #self.model.geom_rgba = np.array([.7, .5, .3, 1])
-
-        if self.imp_time <= self.data.time <= self.imp_time +.3:
+        assert self.imp_time is not None
+        if self.imp_time <= self.data.time <= self.imp_time + 0.3:
             self.data.qfrc_applied[0] = np.cos(self.p_ang * np.pi / 180) * self.p_frc
             self.data.qfrc_applied[2] = np.sin(self.p_ang * np.pi / 180) * self.p_frc
             self.model.geom_rgba[[1, 2, 22], :] = np.array([1, 1, 1, 1])
             self.force_being_applied = True
-
         else:
             self.data.qfrc_applied[:] = 0
             self.model.geom_rgba[[1, 2, 22, 23, 27], :] = np.array([.7, .5, .3, 1])
             self.force_being_applied = False
             if self.data.time > self.imp_time + .3:
                 self.force_already_applied = True
-
-        self.prev_time = copy.copy(self.data.time)  
-
-    def apply_force_eval(self):
-        if self.phase_est is None:
-            return False
-
-        if self.phase_est >= self.p_phs and self.phase_est <= self.p_phs + self.p_dur: 
-            self.data.qfrc_applied[0] = np.cos(self.p_ang * np.pi / 180) * self.p_frc
-            self.data.qfrc_applied[2] = np.sin(self.p_ang * np.pi / 180) * self.p_frc
-            self.model.geom_rgba[[1, 2, 22, 23, 27], :] = np.array([1, 1, 1, 1])
-            self.force_being_applied = True
-
-        else:
-            self.data.qfrc_applied[:] = 0
-            self.model.geom_rgba[[1, 2, 22, 23, 27], :] = np.array([.7, .5, .3, 1])
-            self.force_being_applied = False
-
-        self.prev_time = copy.copy(self.data.time)
-        
-    def estimate_phase(self):
-        if self.phase_est is not None:
-            self.prev_phase = self.phase_est.copy()
-
-        lhs = self.data.body('calcn_l').cfrc_ext[5]
-        rhs = self.data.body('calcn_r').cfrc_ext[5]
-
-        both_feet = lhs > 0 and rhs > 0
-
-        self.lhs_signal = 0
-
-        if self.foot_state == 'wait_lhs':
-            if lhs > 0:
-                self.cycle_start_time = self.data.time
-                self.lhs_signal = 1
-
-                self.lhs_time.append(self.cycle_start_time)
-                self.new_gait_cycle = True
-                if len(self.lhs_time) > 1:
-                    self.gait_cycle_time = np.mean(np.diff(self.lhs_time))
-                    # print(self.gait_cycle_time)
-                self.foot_state = 'wait_rhs'
-        elif self.foot_state == 'wait_rhs':
-            if rhs > 0 and not both_feet:
-                self.foot_state = 'wait_lhs'
-
-        if self.gait_cycle_time is not None and self.new_gait_cycle:
-            self.completed_gait_cycles += 1
-            self.new_gait_cycle = False
-
-        if self.gait_cycle_time is not None:
-            self.phase_est = self.completed_gait_cycles + (self.data.time - self.cycle_start_time)/self.gait_cycle_time
-
-    def reset_model(self):
-        if self.rand_pert_active:
-            self.p_frc_frac = np.random.uniform(self.rand_p_frc_frac_range[0], self.rand_p_frc_frac_range[1])
-            self.p_frc = self.p_frc_frac * 9.81 * 59
-            self.p_frc = np.random.choice([self.p_frc, -self.p_frc])
-            self.imp_time = np.random.uniform(self.rand_imp_time_range[0], self.rand_imp_time_range[1])
-
-        if self.init_type=='init_dist':
-            # This is for checking how diverse the policy can be given the identical starting state. add some noise when we test for robustness.   
-            self.initial_phase_offset = 0
-            qpos = np.random.normal(self.init_qpos_mean, self.init_qpos_std)
-            qvel = np.random.normal(self.init_qvel_mean, self.init_qvel_std)
-        else:
-            raise ValueError(f'init_type {self.init_type} not recognized')
-
-        self.set_state(qpos, qvel)
-
-        self.force_already_applied = False
-        self.force_being_applied = False
-        self.first_left_contact = False
-        self.first_right_contact = False
-        
-        self.left_foot_first_contact_pos = np.array([np.inf, np.inf]) 
-        self.right_foot_first_contact_pos = np.array([np.inf, np.inf])
-        self.left_foot_first_contact_root_pos = np.array([np.inf, np.inf])
-        self.right_foot_first_contact_root_pos = np.array([np.inf, np.inf])
-
-        self.foot_state = 'wait_lhs'
-        self.signal = 0
-        self.lhs_signal = 0
-
-        self.completed_gait_cycles = 0
-        self.lhs_time = collections.deque(maxlen=5)
-        self.gait_cycle_time = None
-        self.new_gait_cycle = False
-        self.data.qfrc_applied[:] = 0
-        self.model.geom_rgba[[1, 2, 22, 23, 27], :] = np.array([.7, .5, .3, 1])
-
-        self.prev_phase = None
-        self.sim_step = 0
-
-        self.force_end_time = None
-        self.force_start_time = None
-        self.prev_time = None
-        self.phase_est = None
-
-        observation = self.get_obs()
-        return observation
-
-    def reset(self):
-        self._reset_simulation()
-        obs = self.reset_model()
-        self.renderer.reset()
-        self.renderer.render_step()
-        return obs
 
     def compute_torque(self, qtarget):
         qpos = self.data.qpos[6:-1].copy()
@@ -558,31 +403,24 @@ class Skeleton(MujocoEnv, utils.EzPickle):
         return torque
     
     def step(self, action):
-        self.pose = action
+        assert isinstance(action, np.ndarray) and action.shape == (self.action_dim,)
+
         for _ in range(self.frame_skip):
             torque = self.compute_torque(action)
             self.data.qvel[-1] = -1.25 # Treadmill
 
             self._step_mujoco_simulation(ctrl=torque, n_frames=1)
-            self.sim_step += 1
-
-            self.estimate_phase()
             if self.p_active or self.rand_pert_active:
-                self.apply_force_sim(imp_time=None) # can give a simulation time, probably between 0 and (gait cycle approx .7 seconds, so perhaps set this between 0 and 3, so it can walk a little bit) 
+                self.apply_force_sim(imp_time=None)
 
         self.update_foot_contact_positions()
-        foot_pos = self.get_episode_foot_contact_positions()
-
         self.renderer.render_step()
         obs = self.get_obs()
         reward = None
-        done = self.done
-        info = {
-            'foot_pos': foot_pos,
-        }
-
-        # if self.render_mode == 'rgb_array':
-        rgb = self.render(mode=self.render_mode)
-        info['rgb'] = rgb[0].astype(np.uint8)
+        done = self.get_done()
+        info = {}
+        if self.render_mode is not None:
+            rgb = self.render(mode=self.render_mode)
+            info['rgb'] = rgb[0].astype(np.uint8)
 
         return obs, reward, done, info
