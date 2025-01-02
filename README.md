@@ -9,7 +9,7 @@ Official codebase for PDP. This codebase currently supports the perturbation rec
 
 ## Setup
 
-Clone the repo and install the dependencies.
+Clone the repo and install the dependencies. Modify the pytorch installation to fit your system.
 
 ```bash
 git clone https://github.com/Stanford-TML/PDP.git

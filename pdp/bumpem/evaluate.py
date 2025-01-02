@@ -13,6 +13,7 @@ from pdp.bumpem.env import Skeleton, ENV_CONFIG
 
 def load_checkpoint(payload):
     cfg = payload['cfg']
+    cfg.training.device = cfg.training.device if torch.cuda.is_available() else 'cpu'
     workspace = hydra.utils.get_class(cfg._target_)(cfg)
     workspace.load_payload(payload)
 
@@ -24,8 +25,9 @@ def load_checkpoint(payload):
 def parse_env_cfg(args):
     cfg = ENV_CONFIG.copy()
     for arg in vars(args):
-        if arg in cfg['pert']:
-            cfg['pert'][arg] = getattr(args, arg)
+        val = getattr(args, arg)
+        if arg in cfg['pert'] and val is not None:
+            cfg['pert'][arg] = val
     return cfg
 
 
