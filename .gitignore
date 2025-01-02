@@ -1,4 +1,7 @@
 data/*
+!data/
+!data/.gitkeep
+
 outputs/*
 visuals/*
 
