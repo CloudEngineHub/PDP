@@ -49,6 +49,7 @@ The result should look something like this:
 
 <img src="assets/bumpem_eval_result.gif" alt="" width="256" height="256" style="border-radius: 5px;">
 
+The parameters of the perturbation can be modified from the command line. The parameters that can be modified are: the magnitude of the force (as a percentage of the skeleton's body weight), the time the perturbation begins, and the direction of the perturbation. An example is given in `scripts/eval_bumpem.sh`.
 
 ## Additional Details
 

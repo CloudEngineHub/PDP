@@ -38,10 +38,19 @@ ENV_CONFIG = {
     'max_ep_time': 6,
     'pert': {
         'active': True,
-        'p_phs': .325,
+
+        # Time at which the perturbation starts
         'imp_time': 0, 
+
+        # Percent of body weight to apply as a perturbation. The applied force is p_frc_frac * 59 Kg * 9.81 m/s^2.
         'p_frc_frac': 0.15,
+
+        # The angle (degrees)FROM which the perturbation force is applied. 0 degrees is the forward direction
+        # of the skeleton, so p_ang = 0 will apply the force from the front (toward the back) of the skeleton.
+        # p_ang = 90 will apply a force from the left (toward the right) of the skeleton.
         'p_ang': 90,
+
+        # Duration of the perturbation
         'p_dur': .3,
     },
     

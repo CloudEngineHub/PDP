@@ -1,3 +1,4 @@
+import time
 import argparse
 import collections
 from pathlib import Path
@@ -7,7 +8,7 @@ import dill
 import hydra
 import torch
 import numpy as np
-from pdp.bumpem.env import Skeleton
+from pdp.bumpem.env import Skeleton, ENV_CONFIG
 
 
 def load_checkpoint(payload):
@@ -20,10 +21,19 @@ def load_checkpoint(payload):
     return policy
 
 
+def parse_env_cfg(args):
+    cfg = ENV_CONFIG.copy()
+    for arg in vars(args):
+        if arg in cfg['pert']:
+            cfg['pert'][arg] = getattr(args, arg)
+    return cfg
+
+
 class Evaluator:
     def __init__(self, args):
         self.args = args
-        self.env = Skeleton()
+        cfg = parse_env_cfg(args)
+        self.env = Skeleton(cfg=cfg)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         payload = torch.load(open(args.ckpt_path, 'rb'), pickle_module=dill)
@@ -62,8 +72,8 @@ class Evaluator:
 
         if self.args.save_video:
             Path('visuals').mkdir(exist_ok=True)
-            imageio.mimsave('visuals/bumpem_eval_result.mp4', frames, fps=50)
-
+            timestamp = time.strftime('%b%d_%H-%M')
+            imageio.mimsave(f'visuals/bumpem_eval_result_{timestamp}.mp4', frames, fps=50)
 
 
 def main(args):
@@ -75,6 +85,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--ckpt_path', type=str, required=True)
     parser.add_argument('--save_video', action='store_true')
-    args = parser.parse_args()
 
+    parser.add_argument('--imp_time', type=float)
+    parser.add_argument('--p_frc_frac', type=float)
+    parser.add_argument('--p_ang', type=float)
+    args = parser.parse_args()
     main(args)
