@@ -21,7 +21,7 @@ conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvi
 pip install -e .
 ```
 
-Then download the Bump-em dataset from <a href="https://drive.google.com/file/d/1CnlsnwA1e5U4UFqUj_Uz_l-tkkjQvh1I/view?usp=drive_link" target="_blank">here</a> and put it in the `data/` directory and extract it.
+Then download the Bump-em dataset from <a href="https://drive.google.com/drive/folders/1HQFb6oLCYiveConeTb-Q9FZBMmX0wREg?usp=drive_link" target="_blank">here</a> and put it in the `data/` directory and extract it.
 
 ```bash
 tar -xzvf /path/to/dataset.tar.gz -C data/
